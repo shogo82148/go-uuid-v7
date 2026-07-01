@@ -61,12 +61,19 @@ func (u UUID) Compare(v UUID) int {
 }
 
 var (
-	v7mu       sync.Mutex
-	v7lastTime uint64
-	v7counter  uint64
+	v7mu        sync.Mutex
+	v7lastTime  uint64
+	v7counter30 uint32
+	v7counter42 uint64
 )
 
-func seedCounter() uint64 {
+func seedCounter30() uint32 {
+	var buf [4]byte
+	rand.Read(buf[:])
+	return binary.BigEndian.Uint32(buf[:]) & (1<<30 - 1)
+}
+
+func seedCounter42() uint64 {
 	var buf [8]byte
 	rand.Read(buf[2:])
 	return binary.BigEndian.Uint64(buf[:]) & (1<<42 - 1)
@@ -80,16 +87,72 @@ func seedCounter() uint64 {
 // NewV7 always returns UUIDs which sort in increasing order,
 // except when the system clock moves backwards.
 func NewV7() UUID {
-	// UUIDv7 is defined in RFC 9562 section 5.7 as:
-	//
+	if hasSubMilliClock {
+		return newV7subMilliClock()
+	} else {
+		return newV7milliClock()
+	}
+}
+
+func newV7subMilliClock() UUID {
 	//  0                   1                   2                   3
 	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	// |                           unix_ts_ms                          |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |          unix_ts_ms           |  ver  |       rand_a          |
+	// |          unix_ts_ms           |  ver  |        frac           |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-	// |var|                        rand_b                             |
+	// |var|                        counter                            |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                            rand_b                             |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	v7mu.Lock()
+
+	// Generate our 60-bit timestamp: 48 bits of millisecond-resolution,
+	// followed by 12 bits of 1/4096-millisecond resolution.
+	now := time.Now()
+	secs := uint64(now.Unix())
+	nanos := uint64(now.Nanosecond())
+	msecs := nanos / 1000000
+	frac := nanos - (1000000 * msecs)
+	timestamp := (1000*secs + msecs) << 12 // ms shifted into position
+	timestamp += (frac * 4096) / 1000000   // ns converted to 1/4096-ms units
+
+	if timestamp <= v7lastTime {
+		v7counter30++
+		if v7counter30 >= 1<<30 {
+			timestamp++
+			v7counter30 = seedCounter30()
+		}
+	} else {
+		v7counter30 = seedCounter30()
+	}
+	v7lastTime = timestamp
+	counter := v7counter30
+
+	v7mu.Unlock()
+
+	// Insert a gap for the 4 bits of the ver field into the timestamp.
+	hibits := ((timestamp << 4) & 0xffff_ffff_ffff_0000) | (timestamp & 0x0ffff)
+
+	var u UUID
+	binary.BigEndian.PutUint64(u[0:8], hibits)
+	binary.BigEndian.PutUint32(u[8:12], counter)
+	rand.Read(u[12:])
+	u.setVersion(7)
+	u.setVariant(0b10)
+	return u
+}
+
+func newV7milliClock() UUID {
+	//  0                   1                   2                   3
+	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                           unix_ts_ms                          |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |          unix_ts_ms           |  ver  |       counter         |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |var|                        counter                            |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 	// |                            rand_b                             |
 	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -102,16 +165,16 @@ func NewV7() UUID {
 	msecs := secs*1000 + nanos/1_000_000
 
 	if msecs <= v7lastTime {
-		v7counter++
-		if v7counter >= 1<<42 {
+		v7counter42++
+		if v7counter42 >= 1<<42 {
 			msecs++
-			v7counter = seedCounter()
+			v7counter42 = seedCounter42()
 		}
 	} else {
-		v7counter = seedCounter()
+		v7counter42 = seedCounter42()
 	}
 	v7lastTime = msecs
-	counter := v7counter
+	counter := v7counter42
 
 	v7mu.Unlock()
 
