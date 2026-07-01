@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"sync"
 	"time"
 )
 
@@ -59,6 +60,18 @@ func (u UUID) Compare(v UUID) int {
 	return 0
 }
 
+var (
+	v7mu       sync.Mutex
+	v7lastTime uint64
+	v7counter  uint64
+)
+
+func seedCounter() uint64 {
+	var buf [8]byte
+	rand.Read(buf[2:])
+	return binary.BigEndian.Uint64(buf[:]) & (1<<42 - 1)
+}
+
 // NewV7 returns a new version 7 UUID.
 //
 // Version 7 UUIDs contain a timestamp in the most significant 48 bits,
@@ -67,14 +80,46 @@ func (u UUID) Compare(v UUID) int {
 // NewV7 always returns UUIDs which sort in increasing order,
 // except when the system clock moves backwards.
 func NewV7() UUID {
+	// UUIDv7 is defined in RFC 9562 section 5.7 as:
+	//
+	//  0                   1                   2                   3
+	//  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                           unix_ts_ms                          |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |          unix_ts_ms           |  ver  |       rand_a          |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |var|                        rand_b                             |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	// |                            rand_b                             |
+	// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+	v7mu.Lock()
+
+	// generate our 48-bit timestamp in milliseconds since the Unix epoch.
 	now := time.Now()
 	secs := uint64(now.Unix())
 	nanos := uint64(now.Nanosecond())
 	msecs := secs*1000 + nanos/1_000_000
 
+	if msecs <= v7lastTime {
+		v7counter++
+		if v7counter >= 1<<42 {
+			msecs++
+			v7counter = seedCounter()
+		}
+	} else {
+		v7counter = seedCounter()
+	}
+	v7lastTime = msecs
+	counter := v7counter
+
+	v7mu.Unlock()
+
 	var u UUID
-	binary.BigEndian.PutUint64(u[:], msecs<<16)
-	rand.Read(u[6:])
+	hi := msecs<<16 | counter>>30
+	binary.BigEndian.PutUint64(u[:8], hi)
+	binary.BigEndian.PutUint32(u[8:12], uint32(counter))
+	rand.Read(u[12:])
 	u.setVersion(7)
 	u.setVariant(0b10)
 	return u
