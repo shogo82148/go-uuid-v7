@@ -133,7 +133,7 @@ func newV7subMilliClock() UUID {
 	v7mu.Unlock()
 
 	// Insert a gap for the 4 bits of the ver field into the timestamp.
-	hibits := ((timestamp << 4) & 0xffff_ffff_ffff_0000) | (timestamp & 0x0ffff)
+	hibits := ((timestamp << 4) & 0xffff_ffff_ffff_0000) | (timestamp & 0x0fff)
 
 	var u UUID
 	binary.BigEndian.PutUint64(u[0:8], hibits)
