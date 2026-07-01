@@ -73,7 +73,7 @@ func NewV7() UUID {
 	msecs := secs*1000 + nanos/1_000_000
 
 	var u UUID
-	binary.BigEndian.PutUint64(u[:], msecs)
+	binary.BigEndian.PutUint64(u[:], msecs<<16)
 	rand.Read(u[6:])
 	u.setVersion(7)
 	u.setVariant(0x10)
