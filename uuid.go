@@ -76,7 +76,7 @@ func NewV7() UUID {
 	binary.BigEndian.PutUint64(u[:], msecs<<16)
 	rand.Read(u[6:])
 	u.setVersion(7)
-	u.setVariant(0x10)
+	u.setVariant(0b10)
 	return u
 }
 
